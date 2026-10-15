@@ -60,4 +60,4 @@ More labs from the same place: [lab-netlab](https://github.com/mitsurutech/lab-n
 
 ## Licence
 
-The lab definition and this documentation are MIT licensed, see [LICENSE](LICENSE): copy them, change them, teach with them. Every address in the case is from the ranges reserved for documentation, and nothing in it is real data.
+The lab definition and this documentation are MIT licensed, see [LICENSE](LICENSE): copy them, change them, teach with them. Every address in the case is from a range reserved for documentation or a private range, and nothing in it is real data.

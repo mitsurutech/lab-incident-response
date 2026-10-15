@@ -1,0 +1,336 @@
+# Incident response and forensics
+# A compromised web server's logs and files, as text to read: no malware, nothing to run.
+# The case is made by the setup below on the first start; only Python is installed, if it is missing.
+cpus: 1
+memory: 1024    # MB
+disk: 10        # GB
+
+# Nothing opens in the browser: the lab is the terminal.
+open: []
+
+# Run once, as root. Its output is kept in /var/log/mitsurutech-setup.log on the VM.
+setup: |
+  export DEBIAN_FRONTEND=noninteractive
+  command -v python3 >/dev/null 2>&1 || { apt-get update -qq; apt-get install -y -qq python3; }
+  home=/home/student
+  [ -d $home ] || home=/root
+  mkdir -p /opt/irlab
+  chmod 700 /opt/irlab
+  cat > /opt/irlab/gen.py <<'IR_GEN_END'
+  import hashlib, json, os, random, sys
+
+  # One fixed seed: every student gets the same case, so the check can know the answers.
+  R = random.Random(20261014)
+  HOME = sys.argv[1]
+  CASE = HOME + '/case'
+  HOST = 'web01'
+  POOL = ['203.0.113.%d' % n for n in (9, 27, 58, 101, 144, 187, 222)] \
+       + ['198.51.100.%d' % n for n in (14, 63, 90, 133, 201)] \
+       + ['192.0.2.%d' % n for n in (7, 77, 150, 233)]
+  R.shuffle(POOL)
+  ATT, NOISY, SCAN, TYPO = POOL[:4]
+  VISITORS = POOL[4:]
+  OFFICE = '10.20.0.15'
+  ACCOUNT = R.choice(['deploy', 'backup', 'jenkins', 'svcweb'])
+  PAYLOAD = R.choice(['sysmon-update', 'logrotate-helper', 'dbus-notifyd', 'apt-refresh'])
+  BOTS = ['admin', 'root', 'test', 'oracle', 'ubuntu', 'postgres', 'git', 'user', 'guest',
+          'ftp', 'pi', 'www', 'nagios', 'tomcat', 'mysql', 'hadoop', 'support']
+  LOCAL = {'root', 'alice', ACCOUNT, 'ops'}
+
+  def hms(sec):
+      return '%02d:%02d:%02d' % (sec // 3600, sec % 3600 // 60, sec % 60)
+
+  auth = []
+  def log(sec, who, text):
+      auth.append((sec, len(auth), 'Oct 14 %s %s %s[%d]: %s' % (hms(sec), HOST, who, R.randrange(900, 32000), text)))
+
+  def sshd(sec, text):
+      log(sec, 'sshd', text)
+
+  def failure(sec, ip, user):
+      port = R.randrange(1024, 65535)
+      if user in LOCAL:
+          sshd(sec, 'Failed password for %s from %s port %d ssh2' % (user, ip, port))
+      else:
+          sshd(sec, 'Invalid user %s from %s port %d' % (user, ip, port))
+          sshd(sec, 'Failed password for invalid user %s from %s port %d ssh2' % (user, ip, port))
+          if R.random() < 0.5:
+              sshd(sec + 1, 'Connection closed by invalid user %s %s port %d [preauth]' % (user, ip, port))
+
+  def session(sec, user, uid, ip, how, minutes):
+      port = R.randrange(1024, 65535)
+      sshd(sec, 'Accepted %s for %s from %s port %d ssh2' % (how, user, ip, port))
+      sshd(sec, 'pam_unix(sshd:session): session opened for user %s(uid=%d) by (uid=0)' % (user, uid))
+      log(sec, 'systemd-logind', 'New session %d of user %s.' % (R.randrange(3, 90), user))
+      sshd(sec + minutes * 60, 'Received disconnect from %s port %d:11: disconnected by user' % (ip, port))
+      sshd(sec + minutes * 60, 'pam_unix(sshd:session): session closed for user %s' % user)
+
+  # The noisy one: the most failures of the day, all day, and never in.
+  for _ in range(260):
+      failure(R.randrange(0, 86400), NOISY, R.choice(BOTS))
+  # A legitimate administrator mistypes a password, then gets in, and adds a colleague.
+  t = 58 * 60 + 12
+  for _ in range(3):
+      failure(t, TYPO, 'alice')
+      t += R.randrange(6, 15)
+  session(t, 'alice', 1000, TYPO, 'password', 40)
+  session(3780, 'alice', 1000, OFFICE, 'publickey', 55)
+  log(3900, 'sudo', '   alice : TTY=pts/1 ; PWD=/home/alice ; USER=root ; COMMAND=/usr/sbin/useradd -m ops')
+  log(3900, 'useradd', 'new user: name=ops, UID=1002, GID=1002, home=/home/ops, shell=/bin/bash')
+  session(34200, 'alice', 1000, OFFICE, 'publickey', 25)
+  session(51600, 'alice', 1000, OFFICE, 'publickey', 12)
+  # Each hour root's own cron job opens a session.
+  for h in range(24):
+      s = h * 3600 + 17 * 60
+      log(s, 'CRON', 'pam_unix(cron:session): session opened for user root(uid=0) by (uid=0)')
+      log(s + 1, 'CRON', 'pam_unix(cron:session): session closed for user root')
+
+  # The intrusion: a burst of guesses, then the right one.
+  T0 = R.randrange(2 * 3600 + 600, 3 * 3600 + 2400)
+  t = T0
+  for i in range(70):
+      failure(t, ATT, R.choice(BOTS) if i < 56 else ACCOUNT)
+      t += R.randrange(2, 8)
+  FIRST = t + 3
+  session(FIRST, ACCOUNT, 1001, ATT, 'password', 21)
+  session(FIRST + 3 * 3600 + 421, ACCOUNT, 1001, ATT, 'password', 9)
+  # What it left behind: a program, and a cron job that runs it every five minutes.
+  DROPPED = FIRST + R.randrange(170, 260)
+  CRONTAB = DROPPED + R.randrange(30, 90)
+  s = (CRONTAB // 300 + 1) * 300
+  while s < 86400:
+      log(s, 'CRON', 'pam_unix(cron:session): session opened for user %s(uid=1001) by (uid=0)' % ACCOUNT)
+      log(s, 'CRON', 'pam_unix(cron:session): session closed for user %s' % ACCOUNT)
+      s += 300
+
+  auth.sort()
+  web = []
+  def hit(sec, ip, method, path, code, size, agent):
+      web.append((sec, len(web), '%s - - [14/Oct/2026:%s +0000] "%s %s HTTP/1.1" %d %d "-" "%s"'
+                  % (ip, hms(sec), method, path, code, size, agent)))
+
+  PAGES = ['/', '/index.html', '/about', '/contact', '/products', '/products/42', '/static/app.css',
+           '/static/app.js', '/favicon.ico', '/login']
+  PROBES = ['/wp-login.php', '/xmlrpc.php', '/.git/config', '/phpmyadmin/', '/.env', '/admin/',
+            '/admin/login', '/server-status', '/backup.zip', '/config.php', '/admin/backup/config.bak']
+  BROWSER = 'Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 Chrome/124.0 Safari/537.36'
+  for _ in range(320):
+      hit(R.randrange(0, 86400), R.choice(VISITORS + [OFFICE]), 'GET', R.choice(PAGES),
+          R.choice([200, 200, 200, 304]), R.randrange(300, 9000), BROWSER)
+  for _ in range(190):
+      hit(R.randrange(0, 86400), SCAN, 'GET', R.choice(PROBES), R.choice([404, 404, 404, 403]),
+          R.randrange(150, 600), 'Go-http-client/1.1')
+  # The same address as the guesses, an hour before them: it asks for everything, and one is there.
+  t = T0 - 1900
+  for path in PROBES[:-1] * 4:
+      hit(t, ATT, 'GET', path, R.choice([404, 404, 403]), R.randrange(150, 600), 'python-requests/2.31.0')
+      t += R.randrange(2, 20)
+  hit(t, ATT, 'GET', '/admin/backup/config.bak', 200, 48211, 'python-requests/2.31.0')
+  hit(t + 9, SCAN, 'GET', '/admin/backup/config.bak', 404, 311, 'Go-http-client/1.1')
+  web.sort()
+
+  def put(name, text):
+      path = CASE + '/' + name
+      os.makedirs(os.path.dirname(path), exist_ok=True)
+      open(path, 'w').write(text)
+
+  put('var/log/auth.log', ''.join(line + '\n' for _, _, line in auth))
+  put('var/log/nginx/access.log', ''.join(line + '\n' for _, _, line in web))
+  put('etc/passwd', '\n'.join([
+      'root:x:0:0:root:/root:/bin/bash', 'daemon:x:1:1:daemon:/usr/sbin:/usr/sbin/nologin',
+      'bin:x:2:2:bin:/bin:/usr/sbin/nologin', 'sys:x:3:3:sys:/dev:/usr/sbin/nologin',
+      'www-data:x:33:33:www-data:/var/www:/usr/sbin/nologin',
+      'sshd:x:109:65534::/run/sshd:/usr/sbin/nologin',
+      'alice:x:1000:1000:Alice Admin,,,:/home/alice:/bin/bash',
+      '%s:x:1001:1001::/home/%s:/bin/bash' % (ACCOUNT, ACCOUNT),
+      'ops:x:1002:1002::/home/ops:/bin/bash']) + '\n')
+  put('home/alice/.ssh/authorized_keys', 'ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAIHk3alice0000000000000000000000000000000 alice@office-laptop\n')
+  put('home/%s/.ssh/authorized_keys' % ACCOUNT, 'ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAIGd3ci00000000000000000000000000000000000 %s@ci-server\n' % ACCOUNT)
+  head = '# DO NOT EDIT THIS FILE - edit the master and reinstall.\n# (/tmp/crontab.%s installed on %s)\n'
+  put('var/spool/cron/crontabs/root', head % ('Xq3k7a', 'Tue Aug 11 09:14:02 2026') + '17 * * * * /usr/local/bin/backup.sh\n')
+  put('var/spool/cron/crontabs/' + ACCOUNT,
+      head % ('Zp9w2e', 'Wed Oct 14 %s 2026' % hms(CRONTAB)) + '*/5 * * * * /usr/local/sbin/%s >/dev/null 2>&1\n' % PAYLOAD)
+
+  rows = []
+  def mt(date, sec, owner, path):
+      rows.append('%s %s %s %s' % (date, hms(sec), owner, path))
+  for i, p in enumerate(['ls', 'cat', 'ssh', 'sudo', 'crontab', 'curl', 'python3', 'find', 'grep', 'ps']):
+      mt('2026-09-02', 40000 + i * 7, 'root', '/usr/bin/' + p)
+  mt('2026-08-11', 33000, 'root', '/usr/local/bin/backup.sh')
+  mt('2026-08-11', 33242, 'root', '/var/spool/cron/crontabs/root')
+  mt('2026-08-20', 41110, 'alice', '/home/alice/.ssh/authorized_keys')
+  mt('2026-09-02', 52000, ACCOUNT, '/home/%s/.ssh/authorized_keys' % ACCOUNT)
+  mt('2026-10-01', 31000, 'www-data', '/var/www/html/index.html')
+  mt('2026-10-14', 3900, 'root', '/etc/passwd')
+  mt('2026-10-14', 3900, 'root', '/etc/shadow')
+  mt('2026-10-14', 3900, 'ops', '/home/ops/.profile')
+  mt('2026-10-14', DROPPED, ACCOUNT, '/usr/local/sbin/' + PAYLOAD)
+  mt('2026-10-14', CRONTAB, ACCOUNT, '/var/spool/cron/crontabs/' + ACCOUNT)
+  rows.sort()
+  put('mtimes.txt', 'date time owner path\n' + '\n'.join(rows) + '\n')
+
+  hashes = {}
+  for base, _, files in os.walk(CASE):
+      for f in files:
+          p = base + '/' + f
+          hashes[p] = hashlib.sha256(open(p, 'rb').read()).hexdigest()
+  os.makedirs('/opt/irlab', exist_ok=True)
+  os.chmod('/opt/irlab', 0o700)
+  open('/opt/irlab/truth.json', 'w').write(json.dumps({
+      'ip': ATT, 'account': ACCOUNT, 'login': hms(FIRST), 'persistence': 'cron',
+      'location': 'var/spool/cron/crontabs/' + ACCOUNT, 'payload': 'usr/local/sbin/' + PAYLOAD,
+      'hashes': hashes}))
+  os.chmod('/opt/irlab/truth.json', 0o600)
+  for base, dirs, files in os.walk(CASE):
+      for n in dirs + files:
+          os.chown(base + '/' + n, 0, 0)
+          os.chmod(base + '/' + n, 0o755 if n in dirs else 0o644)
+  os.chown(CASE, 0, 0)
+  os.chmod(CASE, 0o755)
+  IR_GEN_END
+  python3 /opt/irlab/gen.py $home
+  rm -f /opt/irlab/gen.py
+  cat > $home/README.md <<'IR_README_END'
+  # Incident response: a compromised web server
+
+  Last night the web server web01 was broken into. Its logs and a few files from it were
+  copied for you into the folder case, in your home folder. You are the incident responder:
+  read the evidence, work out what happened, and write down what you found.
+
+  There is no malware here and nothing to run. It is all text, to read with the tools every
+  Linux machine has: less, grep, awk, sort, uniq, cut, wc, sed and head.
+
+  ## The evidence
+
+      case/var/log/auth.log           the SSH and cron log for the day
+      case/var/log/nginx/access.log   the web server's access log for the day
+      case/etc/passwd                 the accounts on web01
+      case/home/*/.ssh/               each account's authorized_keys
+      case/var/spool/cron/crontabs/   each account's crontab
+      case/mtimes.txt                 when files were last changed: date, time, owner, path
+
+  The files are read-only so that the evidence stays as it was: copy anything you want to
+  change (cp -r case work). All times are web01's own clock, on 14 October.
+
+  ## What to find
+
+  An intruder got in over SSH, and left something behind to keep their access. Find:
+
+   - the address the attack came from (not just the address that failed most often: some
+     addresses here are only noise, and one failed and then gave the right password)
+   - the account they broke into
+   - the time of their first successful login, as it appears in auth.log
+   - the persistence they left: its kind (for example cron, an ssh key, a new user, a
+     service), the file it lives in under case, and the program it keeps running
+
+  Some things here were done by the administrator, and are not the intruder's. A change that
+  happened before the intruder arrived cannot be theirs.
+
+  ## Write your answers
+
+  Edit answers.txt in this folder (nano answers.txt). One labelled line for each: the label, a colon,
+  then what you found. Capitals and spaces do not matter.
+
+      attacker_ip:
+      account:
+      first_login:
+      persistence:
+      location:
+      payload:
+
+  Your teacher's check reads this file and the evidence. When a field is wrong it names the
+  first one and does not say what the answer is.
+  IR_README_END
+  cat > $home/answers.txt <<'IR_ANSWERS_END'
+  attacker_ip:
+  account:
+  first_login:
+  persistence:
+  location:
+  payload:
+  IR_ANSWERS_END
+  chown student:student $home/README.md $home/answers.txt 2>/dev/null
+  echo "Read README.md in your home folder first." > /etc/motd
+
+# Marks a handed-in VM, KAN-29: run as root on a copy of the saved disk after a fresh boot, so
+# it sees only what was saved. Its exit status is the result: 0 passes.
+check: |
+  python3 - <<'IR_CHECK_END'
+  import hashlib, json, os, re, sys
+
+  def say(ok, why):
+      print(('PASSED: ' if ok else 'NOT PASSED: ') + why)
+      sys.exit(0 if ok else 1)
+
+  try:
+      truth = json.load(open('/opt/irlab/truth.json'))
+  except Exception:
+      say(False, 'the case was never set up on this machine: setup did not finish')
+  # The evidence is as it was handed out: the answers have to come from reading it.
+  for path, digest in truth['hashes'].items():
+      try:
+          same = hashlib.sha256(open(path, 'rb').read()).hexdigest() == digest
+      except Exception:
+          same = False
+      if not same:
+          say(False, 'the evidence in /home/student/case was changed or removed (%s): work on a copy' % path)
+
+  try:
+      lines = open('/home/student/answers.txt', encoding='utf-8', errors='replace').read().splitlines()
+  except Exception:
+      say(False, '/home/student/answers.txt does not exist')
+
+  def field(key):
+      words = set(re.sub(r'[^a-z]+', ' ', key.lower()).split())
+      if words & {'payload', 'binary', 'program', 'executable'}: return 'payload'
+      if words & {'location', 'file', 'path', 'where'}: return 'location'
+      if words & {'ip', 'address', 'attacker'}: return 'ip'
+      if words & {'login', 'time', 'when'}: return 'login'
+      if words & {'account', 'user', 'username', 'compromised'}: return 'account'
+      if words & {'persistence', 'mechanism', 'method'}: return 'persistence'
+      return None
+
+  given = {}
+  for line in lines:
+      found = re.match(r'^\s*([^:=#]+?)\s*[:=]\s*(.*?)\s*$', line)
+      if found and field(found.group(1)) and field(found.group(1)) not in given:
+          given[field(found.group(1))] = found.group(2).strip().strip('\'"')
+
+  def where(text):
+      text = re.sub(r'\s+', '', text.lower())
+      text = re.sub(r'^.*/case/', '', text)
+      return re.sub(r'^[~.]?/+', '', text).rstrip('/')
+
+  def ip(text):
+      return re.findall(r'\b\d{1,3}(?:\.\d{1,3}){3}\b', text) == [truth['ip']]
+
+  def login(text):
+      found = re.findall(r'\b(\d{1,2}):(\d{2}):(\d{2})\b', text)
+      return len(found) == 1 and '%02d:%s:%s' % (int(found[0][0]), found[0][1], found[0][2]) == truth['login']
+
+  def account(text):
+      return (re.split(r'[\s(,;]', text.strip() or ' ')[0].lower() == truth['account'])
+
+  def persistence(text):
+      low = text.lower()
+      other = re.search(r'authorized|ssh|passwd|systemd|service|rc\.local|bashrc|profile|new.?user', low)
+      return bool(re.search(r'cron', low)) and not other
+
+  def location(text):
+      mine = where(text)
+      return bool(mine) and (mine == truth['location'] or ('/' in mine and truth['location'].endswith('/' + mine)))
+
+  def payload(text):
+      mine = where(text)
+      return bool(mine) and (mine == truth['payload'] or mine == os.path.basename(truth['payload']))
+
+  ASKED = [('ip', 'attacker_ip', ip), ('account', 'account', account), ('login', 'first_login', login),
+           ('persistence', 'persistence', persistence), ('location', 'location', location),
+           ('payload', 'payload', payload)]
+  for key, name, right in ASKED:
+      if not given.get(key):
+          say(False, '%s is missing or empty in /home/student/answers.txt' % name)
+      if not right(given[key]):
+          say(False, '%s is not right: check it against the evidence in /home/student/case' % name)
+  say(True, 'every answer matches the evidence: the address, the account, the time of the first login, and the persistence that was left behind')
+  IR_CHECK_END

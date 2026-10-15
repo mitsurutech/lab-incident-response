@@ -1,0 +1,23 @@
+name: check
+on:
+  push:
+  pull_request:
+jobs:
+  check:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: The lab is valid and inside the platform's limits
+        run: |
+          python3 - <<'PY'
+          import yaml
+          d = yaml.safe_load(open('incident-response.lab.yaml'))
+          for key in ('cpus', 'memory', 'disk', 'setup', 'check'):
+              assert key in d, f'no {key}'
+          assert d['open'] == [], d['open']
+          for key in ('setup', 'check'):
+              size = len(d[key].encode())
+              assert size <= 16384, f'{key} is {size} bytes, over 16 KB'
+          compile(d['check'].split("<<'IR_CHECK_END'\n")[1].split('IR_CHECK_END')[0], 'check', 'exec')
+          print('incident-response.lab.yaml ok')
+          PY

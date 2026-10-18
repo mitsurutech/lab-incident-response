@@ -1,5 +1,7 @@
 # Incident response and forensics lab: investigate a compromised Linux server
 
+[English](README.md) | [Français](README.fr.md) | [日本語](README.ja.md) | [Español](README.es.md)
+
 [![check](https://github.com/mitsurutech/lab-incident-response/actions/workflows/check.yml/badge.svg)](https://github.com/mitsurutech/lab-incident-response/actions/workflows/check.yml)
 
 A ready-made **incident response and digital forensics lab** for classrooms, from the [MitsuruTech Learning Platform](https://mitsurutech.co.uk/learning), where schools and colleges give every student their own machine and terminal in the browser. Each student gets their own Ubuntu VM holding a **compromised web server's logs and files**: an SSH log with a brute-force attack, a web server access log full of scanners, the accounts file, crontabs and a list of file modification times. They find **the attacker's IP address, the account that was broken into, the time of the first login and the persistence the intruder left behind**, then write what they found in `answers.txt`. Nothing is installed on the student's computer.
@@ -60,4 +62,6 @@ More labs from the same place: [lab-netlab](https://github.com/mitsurutech/lab-n
 
 ## Licence
 
-The lab definition and this documentation are MIT licensed, see [LICENSE](LICENSE): copy them, change them, teach with them. Every address in the case is from a range reserved for documentation or a private range, and nothing in it is real data.
+This work is licensed under [CC BY-NC-SA 4.0](https://creativecommons.org/licenses/by-nc-sa/4.0/). You may share it and adapt it for learning and teaching, if you credit Mitsuru Technologies Ltd, do not use it commercially, and share anything you make from it under the same licence. The full text is in the `LICENSE` file.
+
+Every address in the case is from a range reserved for documentation or a private range, and nothing in it is real data.
